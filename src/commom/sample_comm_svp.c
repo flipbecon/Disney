@@ -96,46 +96,6 @@ HI_VOID SAMPLE_COMM_SVP_CheckSysExit(HI_VOID)
 }
 
 /*
-*Load bin
-*/
-HI_S32 SAMPLE_COMM_SVP_LoadCoreBinary(SVP_DSP_ID_E enCoreId)
-{
-    HI_S32 s32Ret = HI_FAILURE;
-    HI_CHAR * aszBin[4][4] = {
-    {"./dsp_bin/dsp0/hi_sram.bin","./dsp_bin/dsp0/hi_iram0.bin","./dsp_bin/dsp0/hi_dram0.bin","./dsp_bin/dsp0/hi_dram1.bin"},
-    {"./dsp_bin/dsp1/hi_sram.bin","./dsp_bin/dsp1/hi_iram0.bin","./dsp_bin/dsp1/hi_dram0.bin","./dsp_bin/dsp1/hi_dram1.bin"},
-    {"./dsp_bin/dsp2/hi_sram.bin","./dsp_bin/dsp2/hi_iram0.bin","./dsp_bin/dsp2/hi_dram0.bin","./dsp_bin/dsp2/hi_dram1.bin"},
-    {"./dsp_bin/dsp3/hi_sram.bin","./dsp_bin/dsp3/hi_iram0.bin","./dsp_bin/dsp3/hi_dram0.bin","./dsp_bin/dsp3/hi_dram1.bin"}};
-
-    s32Ret = HI_MPI_SVP_DSP_PowerOn(enCoreId);
-	SAMPLE_SVP_CHECK_EXPR_RET(HI_SUCCESS != s32Ret, s32Ret, SAMPLE_SVP_ERR_LEVEL_ERROR, "Error(%#x):HI_MPI_SVP_DSP_PowerUp failed!\n", s32Ret);
-
-    s32Ret = HI_MPI_SVP_DSP_LoadBin(aszBin[enCoreId][1], enCoreId * 4 + 1);
-	SAMPLE_SVP_CHECK_EXPR_RET(HI_SUCCESS != s32Ret, s32Ret, SAMPLE_SVP_ERR_LEVEL_ERROR, "Error(%#x):HI_MPI_SVP_DSP_LoadBin failed!\n", s32Ret);
-    s32Ret = HI_MPI_SVP_DSP_LoadBin(aszBin[enCoreId][0], enCoreId * 4 + 0);
-    SAMPLE_SVP_CHECK_EXPR_RET(HI_SUCCESS != s32Ret, s32Ret, SAMPLE_SVP_ERR_LEVEL_ERROR, "Error(%#x):HI_MPI_SVP_DSP_LoadBin failed!\n", s32Ret);
-    s32Ret = HI_MPI_SVP_DSP_LoadBin(aszBin[enCoreId][2], enCoreId * 4 + 2);
-    SAMPLE_SVP_CHECK_EXPR_RET(HI_SUCCESS != s32Ret, s32Ret, SAMPLE_SVP_ERR_LEVEL_ERROR, "Error(%#x):HI_MPI_SVP_DSP_LoadBin failed!\n", s32Ret);
-    s32Ret = HI_MPI_SVP_DSP_LoadBin(aszBin[enCoreId][3], enCoreId * 4 + 3);
-    SAMPLE_SVP_CHECK_EXPR_RET(HI_SUCCESS != s32Ret, s32Ret, SAMPLE_SVP_ERR_LEVEL_ERROR, "Error(%#x):HI_MPI_SVP_DSP_LoadBin failed!\n", s32Ret);
-
-    s32Ret = HI_MPI_SVP_DSP_EnableCore(enCoreId);
-    SAMPLE_SVP_CHECK_EXPR_RET(HI_SUCCESS != s32Ret, s32Ret, SAMPLE_SVP_ERR_LEVEL_ERROR, "Error(%#x):HI_MPI_SVP_DSP_EnableCore failed!\n", s32Ret);
-    return s32Ret;
-}
-
-/*
-*UnLoad bin
-*/
-void SAMPLE_COMM_SVP_UnLoadCoreBinary(SVP_DSP_ID_E enCoreId)
-{
-   HI_S32 s32Ret = HI_FAILURE;
-   s32Ret = HI_MPI_SVP_DSP_DisableCore(enCoreId);
-   SAMPLE_SVP_CHECK_EXPR_RET_VOID(HI_SUCCESS != s32Ret, SAMPLE_SVP_ERR_LEVEL_ERROR, "Error(%#x):HI_MPI_SVP_DSP_DisableCore failed!\n", s32Ret);
-   s32Ret = HI_MPI_SVP_DSP_PowerOff(enCoreId);
-   SAMPLE_SVP_CHECK_EXPR_RET_VOID(HI_SUCCESS != s32Ret, SAMPLE_SVP_ERR_LEVEL_ERROR, "Error(%#x):HI_MPI_SVP_DSP_PowerDown failed!\n", s32Ret);
-}
-/*
 *Align
 */
 HI_U32 SAMPLE_COMM_SVP_Align(HI_U32 u32Size, HI_U16 u16Align)

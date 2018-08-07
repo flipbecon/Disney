@@ -45,7 +45,6 @@ HI_S32 SAMPLE_COMM_VPSS_Start(VPSS_GRP VpssGrp, HI_BOOL* pabChnEnable, VPSS_GRP_
         if(HI_TRUE == pabChnEnable[j])
         {
             VpssChn = j;
-            printf("vpss channel = %d \n", VpssChn);
             s32Ret = HI_MPI_VPSS_SetChnAttr(VpssGrp, VpssChn, &pastVpssChnAttr[VpssChn]);
 
             if (s32Ret != HI_SUCCESS)
