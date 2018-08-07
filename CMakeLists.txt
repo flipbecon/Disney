@@ -3,6 +3,7 @@ project(vdec)
 
 #rtsp://admin:admin123@192.168.4.1/ch1/h264/av_stream
 #rtsp://admin:admin@192.168.19.101:554/cam/realmonitor?channel=1&subtype=0
+#rtsp://192.168.2.148:8554/live/t1061
 
 set(CMAKE_C_COMPILER aarch64-himix100-linux-gcc)
 set(CMAKE_CXX_COMPILER aarch64-himix100-linux-g++)
@@ -20,8 +21,6 @@ add_definitions(-DVER_Y=0)
 add_definitions(-DVER_P=0)
 add_definitions(-DVER_B=10)
 
-#add_definitions(-DSAVE)
-
 add_definitions(-DSENSOR0_TYPE=SONY_IMX477_MIPI_8M_30FPS_12BIT)
 add_definitions(-DSENSOR1_TYPE=SONY_IMX477_MIPI_8M_30FPS_12BIT)
 add_definitions(-DSENSOR2_TYPE=SONY_IMX477_MIPI_8M_30FPS_12BIT)
@@ -31,11 +30,13 @@ add_definitions(-DSENSOR5_TYPE=SONY_IMX477_MIPI_8M_30FPS_12BIT)
 add_definitions(-DSENSOR6_TYPE=SONY_IMX477_MIPI_8M_30FPS_12BIT)
 add_definitions(-DSENSOR7_TYPE=SONY_IMX477_MIPI_8M_30FPS_12BIT)
 
+include_directories(include/tbb)
 include_directories(include/hisi)
 include_directories(include/opencv)
 include_directories(include/ffmpeg)
 include_directories(include/deepglint)
 
+link_directories(lib/tbb)
 link_directories(lib/hisi)
 link_directories(lib/ffmpeg)
 link_directories(lib/opencv)
@@ -50,4 +51,4 @@ add_executable(NeverMore NeverMore.cpp)
 
 target_link_libraries(NeverMore deepglint hisi_common libnnie.a libmpi.a libive.a libhdmi.a libVoiceEngine.a libupvqe.a libdnvqe.a libsecurec.a
         libavdevice.a libavformat.a libavcodec.a libavfilter.a libavutil.a libswresample.a libopencv_core.a libopencv_highgui.a
-        libzlib.a -lpthread -lm -ldl -lstdc++)
+        libzlib.a -ltbb -lpthread -lm -ldl -lstdc++)

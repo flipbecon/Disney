@@ -341,7 +341,9 @@ HI_VOID * SAMPLE_COMM_VDEC_SendStream(HI_VOID *pArgs)
     ifmt_ctx->interrupt_callback.callback = TimeOutCallBack;
     ifmt_ctx->interrupt_callback.opaque = &basetime;
 
+    printf("file name = %s \n", pstVdecThreadParam->cFileName);
     s32Ret = avformat_open_input(&ifmt_ctx, pstVdecThreadParam->cFileName, 0, &avdic);
+
     MACRO_CHECK_RETURN(s32Ret);
 
     s32Ret = avformat_find_stream_info(ifmt_ctx, 0);
@@ -355,6 +357,7 @@ HI_VOID * SAMPLE_COMM_VDEC_SendStream(HI_VOID *pArgs)
             break;
         }
     }
+    gettimeofday(&basetime, NULL);
     while (!av_read_frame(ifmt_ctx, &pkt))
     {
         if(pkt.stream_index == video_index)
@@ -682,10 +685,11 @@ HI_VOID SAMPLE_COMM_VDEC_StartSendStream(HI_S32 s32ChnNum, VDEC_THREAD_PARAM_S *
 
     for(i=0; i<s32ChnNum; i++)
     {
-        pVdecThread[i] = 0;
+        pVdecThread[i] = i;
         pthread_create(&pVdecThread[i], 0, SAMPLE_COMM_VDEC_SendStream, (HI_VOID *)&pstVdecSend[i]);
     }
 }
+
 
 HI_VOID SAMPLE_COMM_VDEC_StopSendStream(HI_S32 s32ChnNum, VDEC_THREAD_PARAM_S *pstVdecSend, pthread_t *pVdecThread)
 {
@@ -883,6 +887,7 @@ HI_S32 SAMPLE_COMM_VDEC_Start(HI_S32 s32ChnNum, SAMPLE_VDEC_ATTR *pastSampleVdec
         CHECK_CHN_RET(HI_MPI_VDEC_SetChnParam(i, &stChnParam), i, "HI_MPI_VDEC_SetChnParam");
 
         CHECK_CHN_RET(HI_MPI_VDEC_StartRecvStream(i), i, "HI_MPI_VDEC_StartRecvStream");
+        printf("vdec channel number = %d \n", i);
     }
 
     return HI_SUCCESS;

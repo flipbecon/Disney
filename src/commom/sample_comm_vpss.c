@@ -40,26 +40,23 @@ HI_S32 SAMPLE_COMM_VPSS_Start(VPSS_GRP VpssGrp, HI_BOOL* pabChnEnable, VPSS_GRP_
         return HI_FAILURE;
     }
 
-    for (j = 0; j < VPSS_MAX_PHY_CHN_NUM; j++)
+    if(HI_TRUE == pabChnEnable[VpssGrp])
     {
-        if(HI_TRUE == pabChnEnable[j])
+        VpssChn = 0;
+        s32Ret = HI_MPI_VPSS_SetChnAttr(VpssGrp, VpssChn, &pastVpssChnAttr[VpssChn]);
+
+        if (s32Ret != HI_SUCCESS)
         {
-            VpssChn = j;
-            s32Ret = HI_MPI_VPSS_SetChnAttr(VpssGrp, VpssChn, &pastVpssChnAttr[VpssChn]);
+            SAMPLE_PRT("HI_MPI_VPSS_SetChnAttr failed with %#x\n", s32Ret);
+            return HI_FAILURE;
+        }
 
-            if (s32Ret != HI_SUCCESS)
-            {
-                SAMPLE_PRT("HI_MPI_VPSS_SetChnAttr failed with %#x\n", s32Ret);
-                return HI_FAILURE;
-            }
+        s32Ret = HI_MPI_VPSS_EnableChn(VpssGrp, VpssChn);
 
-            s32Ret = HI_MPI_VPSS_EnableChn(VpssGrp, VpssChn);
-
-            if (s32Ret != HI_SUCCESS)
-            {
-                SAMPLE_PRT("HI_MPI_VPSS_EnableChn failed with %#x\n", s32Ret);
-                return HI_FAILURE;
-            }
+        if (s32Ret != HI_SUCCESS)
+        {
+            SAMPLE_PRT("HI_MPI_VPSS_EnableChn failed with %#x\n", s32Ret);
+            return HI_FAILURE;
         }
     }
 
@@ -116,8 +113,6 @@ HI_S32 SAMPLE_COMM_VPSS_Stop(VPSS_GRP VpssGrp, HI_BOOL* pabChnEnable)
 
     return HI_SUCCESS;
 }
-
-
 
 #ifdef __cplusplus
 #if __cplusplus

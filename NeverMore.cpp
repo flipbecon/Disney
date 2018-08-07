@@ -9,12 +9,12 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <pthread.h>
-#include <math.h>
-#include <unistd.h>
-#include <signal.h>
-#include <opencv2/opencv.hpp>
+#include "thread"
+
 
 #include "utils.h"
+#include "ive.h"
+#include "nnie.h"
 #include "sample_comm.h"
 #include "sample_comm_svp.h"
 #include "sample_comm_nnie.h"
@@ -25,38 +25,8 @@
 #define INPUT_VIDEO_WIDTH  1920
 #define INPUT_VIDEO_HEIGHT 1080
 
-struct Bbox{
-    float confidence;
-    cv::Rect_<float> rect;
-    bool deleted;
-    int idx;
-};
-
-bool mycmp(struct Bbox b1, struct Bbox b2)
-{
-    return b1.confidence>b2.confidence;
-}
-
-void nms(std::vector<struct Bbox>& p, float threshold) {
-
-    sort(p.begin(), p.end(), mycmp);
-    for (int i = 0; i < p.size(); i++) {
-        if (p[i].deleted)
-            continue;
-        for (int j = i + 1; j < p.size(); j++) {
-
-            if (!p[j].deleted) {
-                cv::Rect_<float> intersect = p[i].rect & p[j].rect;
-                float iou = intersect.area() * 1.0
-                            / (p[i].rect.area() + p[j].rect.area()
-                               - intersect.area());
-                if (iou > threshold) {
-                    p[j].deleted = true;
-                }
-            }
-        }
-    }
-}
+using namespace std;
+using namespace tbb;
 
 HI_VOID SAMPLE_VDEC_HandleSig(HI_S32 signo)
 {
@@ -472,16 +442,23 @@ HI_S32 SAMPLE_RTSP_VDEC_VPSS(HI_VOID) {
     HI_S32 k, s32Ret = HI_SUCCESS;
     VDEC_THREAD_PARAM_S stVdecSend[VDEC_MAX_CHN_NUM];
     SIZE_S stDispSize;
-    HI_U32 i, u32VdecChnNum;
+    HI_U32 i, channel_index, u32VdecChnNum;
     VPSS_GRP VpssGrp;
     pthread_t VdecThread[2 * VDEC_MAX_CHN_NUM];
-    PIC_SIZE_E enDispPicSize;
+    pthread_t IveThread[2 * VDEC_MAX_CHN_NUM];
+    pthread_t NnieThread[2 * VDEC_MAX_CHN_NUM];
+
     SAMPLE_VDEC_ATTR astSampleVdec[VDEC_MAX_CHN_NUM];
     VPSS_CHN_ATTR_S astVpssChnAttr[VPSS_MAX_CHN_NUM];
     VPSS_GRP_ATTR_S stVpssGrpAttr;
     HI_BOOL abChnEnable[VPSS_MAX_CHN_NUM];
 
+    IVE_WORKER_S iveWorkerS;
+    NNIE_WORKER_S nnieWorkerS;
     u32VdecChnNum = 1;
+
+    HI_U32 u32IveChnNum = 1;
+    HI_U32 u32NnieChnNum = 1;
     fd_set read_fds;
     HI_S32 VdecFd[VDEC_MAX_CHN_NUM];
 
@@ -495,24 +472,21 @@ HI_S32 SAMPLE_RTSP_VDEC_VPSS(HI_VOID) {
     SAMPLE_SVP_NNIE_SSD_SOFTWARE_PARAM_S s_stSsdSoftwareParam = {0};
     HI_CHAR *pcModelName = "./source_file/inst_FaceDetect_inst.wk";
 
-    //HI_CHAR szFilename[32];
+    concurrent_bounded_queue<VIDEO_FRAME_INFO_S *> frameQueue;
+    frameQueue.set_capacity(50);
+
+    concurrent_bounded_queue<IVE_IMAGE_S *> imageQueue;
+    imageQueue.set_capacity(50);
+
+//    concurrent_bounded_queue<pair<VIDEO_FRAME_INFO_S *, IVE_IMAGE_S *>> pipelineQueue;
+//    pipelineQueue.set_capacity(50);
 
     /************************************************
     step1:  init SYS, init common VB(for VPSS and VO)
     *************************************************/
-    if (VO_OUTPUT_1080P30 == g_enIntfSync) {
-        enDispPicSize = PIC_1080P;
-    } else {
-        enDispPicSize = PIC_1080P;
-    }
 
-    s32Ret = SAMPLE_COMM_SYS_GetPicSize(enDispPicSize, &stDispSize);
-
-    if (s32Ret != HI_SUCCESS)
-    {
-        SAMPLE_PRT("sys get pic size fail for %#x!\n", s32Ret);
-        goto END1;
-    }
+    stDispSize.u32Height = INPUT_VIDEO_HEIGHT;
+    stDispSize.u32Width = INPUT_VIDEO_WIDTH;
 
     memset(&stVbConfig, 0, sizeof(VB_CONFIG_S));
     stVbConfig.u32MaxPoolCnt = 1;
@@ -543,7 +517,7 @@ HI_S32 SAMPLE_RTSP_VDEC_VPSS(HI_VOID) {
         astSampleVdec[i].u32FrameBufCnt =
                 astSampleVdec[i].stSapmleVdecVideo.u32RefFrameNum + astSampleVdec[i].u32DisplayFrameNum + 1;
     }
-    s32Ret = SAMPLE_COMM_VDEC_InitVBPool(u32VdecChnNum, &astSampleVdec[0]);
+    s32Ret = SAMPLE_COMM_VDEC_InitVBPool(u32VdecChnNum, astSampleVdec);
     if (s32Ret != HI_SUCCESS)
     {
         SAMPLE_PRT("init mod common vb fail for %#x!\n", s32Ret);
@@ -553,7 +527,7 @@ HI_S32 SAMPLE_RTSP_VDEC_VPSS(HI_VOID) {
     /************************************************
     step3:  start VDEC
     *************************************************/
-    s32Ret = SAMPLE_COMM_VDEC_Start(u32VdecChnNum, &astSampleVdec[0]);
+    s32Ret = SAMPLE_COMM_VDEC_Start(u32VdecChnNum, astSampleVdec);
     if (s32Ret != HI_SUCCESS) {
         SAMPLE_PRT("start VDEC fail for %#x!\n", s32Ret);
         goto END3;
@@ -571,53 +545,36 @@ HI_S32 SAMPLE_RTSP_VDEC_VPSS(HI_VOID) {
     stVpssGrpAttr.bNrEn = HI_FALSE;
 
     memset(abChnEnable, 0, sizeof(abChnEnable));
-    abChnEnable[0] = HI_TRUE;
-    astVpssChnAttr[0].u32Width = stDispSize.u32Width;
-    astVpssChnAttr[0].u32Height = stDispSize.u32Height;
-    astVpssChnAttr[0].enChnMode = VPSS_CHN_MODE_USER;
-    astVpssChnAttr[0].enCompressMode = COMPRESS_MODE_NONE;
-    astVpssChnAttr[0].enDynamicRange = DYNAMIC_RANGE_SDR8;
-    astVpssChnAttr[0].enPixelFormat = PIXEL_FORMAT_YVU_SEMIPLANAR_420;
-    astVpssChnAttr[0].stFrameRate.s32SrcFrameRate = -1;
-    astVpssChnAttr[0].stFrameRate.s32DstFrameRate = -1;
-    astVpssChnAttr[0].u32Depth = 1;
-    astVpssChnAttr[0].bMirror = HI_FALSE;
-    astVpssChnAttr[0].bFlip = HI_FALSE;
-    astVpssChnAttr[0].stAspectRatio.enMode = ASPECT_RATIO_NONE;
-    astVpssChnAttr[0].enVideoFormat = VIDEO_FORMAT_LINEAR;
-
+    for (i = 0; i < u32VdecChnNum; i++)
+    {
+        abChnEnable[i] = HI_TRUE;
+        astVpssChnAttr[i].u32Width = stDispSize.u32Width;
+        astVpssChnAttr[i].u32Height = stDispSize.u32Height;
+        astVpssChnAttr[i].enChnMode = VPSS_CHN_MODE_USER;
+        astVpssChnAttr[i].enCompressMode = COMPRESS_MODE_NONE;
+        astVpssChnAttr[i].enDynamicRange = DYNAMIC_RANGE_SDR8;
+        astVpssChnAttr[i].enPixelFormat = PIXEL_FORMAT_YVU_SEMIPLANAR_420;
+        astVpssChnAttr[i].stFrameRate.s32SrcFrameRate = -1;
+        astVpssChnAttr[i].stFrameRate.s32DstFrameRate = -1;
+        astVpssChnAttr[i].u32Depth = 1;
+        astVpssChnAttr[i].bMirror = HI_FALSE;
+        astVpssChnAttr[i].bFlip = HI_FALSE;
+        astVpssChnAttr[i].stAspectRatio.enMode = ASPECT_RATIO_NONE;
+        astVpssChnAttr[i].enVideoFormat = VIDEO_FORMAT_LINEAR;
+    }
+    printf("vpss start entered \n");
     for (i = 0; i < u32VdecChnNum; i++)
     {
         VpssGrp = i;
-        s32Ret = SAMPLE_COMM_VPSS_Start(VpssGrp, &abChnEnable[0], &stVpssGrpAttr, &astVpssChnAttr[0]);
+        s32Ret = SAMPLE_COMM_VPSS_Start(VpssGrp, abChnEnable, &stVpssGrpAttr, astVpssChnAttr);
         if (s32Ret != HI_SUCCESS) {
             SAMPLE_PRT("start VPSS fail for %#x!\n", s32Ret);
             goto END4;
         }
     }
-
+    printf("vpss start end \n");
     /************************************************
-    step6:  start VENC
-    *************************************************/
-    VENC_GOP_ATTR_S stGopAttr;
-    VENC_CHN VeH264Chn = 0;
-    PAYLOAD_TYPE_E enStreamType = PT_H264;
-    PIC_SIZE_E aenSize[VPSS_CHN_NUM];
-    aenSize[0] = PIC_1080P;
-    SAMPLE_RC_E enRcMode = SAMPLE_RC_CBR;
-
-    s32Ret = SAMPLE_COMM_VENC_GetGopAttr(VENC_GOPMODE_NORMALP, &stGopAttr);
-    SAMPLE_CHECK_EXPR_GOTO(HI_SUCCESS != s32Ret, END5,
-                           "Error(%#x),SAMPLE_COMM_VENC_GetGopAttr failed!\n",s32Ret);
-    s32Ret = SAMPLE_COMM_VENC_Start(VeH264Chn, enStreamType,aenSize[0],enRcMode,0,&stGopAttr);
-    SAMPLE_CHECK_EXPR_GOTO(HI_SUCCESS != s32Ret, END5,
-                           "Error(%#x),SAMPLE_COMM_VENC_Start failed!\n",s32Ret);
-    s32Ret = SAMPLE_COMM_VENC_StartGetStream(&VeH264Chn, 1);
-    SAMPLE_CHECK_EXPR_GOTO(HI_SUCCESS != s32Ret, END5,
-                           "Error(%#x),SAMPLE_COMM_VENC_StartGetStream failed!\n",s32Ret);
-
-    /************************************************
-    step7:  VDEC bind VPSS
+    step5:  VDEC bind VPSS
     *************************************************/
     for (i = 0; i < u32VdecChnNum; i++) {
         s32Ret = SAMPLE_COMM_VDEC_Bind_VPSS(i, i);
@@ -628,11 +585,10 @@ HI_S32 SAMPLE_RTSP_VDEC_VPSS(HI_VOID) {
     }
 
     /************************************************
-    step8:  get fd from VPSS
+    step6:  get fd from VPSS
     *************************************************/
-
     for (i = 0; i < u32VdecChnNum; i++) {
-        VdecFd[i] = HI_MPI_VPSS_GetChnFd(VpssGrp, i);
+        VdecFd[i] = HI_MPI_VPSS_GetChnFd(i, 0);
         if (VdecFd[i] < 0) {
             SAMPLE_PRT("HI_MPI_VENC_GetFd failed with %#x!\n",
                        VdecFd[i]);
@@ -645,7 +601,7 @@ HI_S32 SAMPLE_RTSP_VDEC_VPSS(HI_VOID) {
     }
 
     /************************************************
-    step9:  start NNIE
+    step7:  start NNIE
     *************************************************/
 
     s32Ret = SAMPLE_COMM_SVP_NNIE_LoadModel(pcModelName,&s_stSsdModel);
@@ -658,7 +614,6 @@ HI_S32 SAMPLE_RTSP_VDEC_VPSS(HI_VOID) {
     stNnieCfg.u32MaxRoiNum = 0;
     stNnieCfg.aenNnieCoreId[0] = SVP_NNIE_ID_0;//set NNIE core
 
-
     s_stSsdNnieParam.pstModel = &s_stSsdModel.stModel;
     s32Ret = SAMPLE_SVP_NNIE_Ssd_ParamInit(&stNnieCfg,&s_stSsdNnieParam,&s_stSsdSoftwareParam);
     if(s32Ret != HI_SUCCESS)
@@ -667,10 +622,10 @@ HI_S32 SAMPLE_RTSP_VDEC_VPSS(HI_VOID) {
     }
 
     /************************************************
-    step10:  send stream to VDEC
+    step8:  send stream to VDEC
     *************************************************/
     for (i = 0; i < u32VdecChnNum; i++) {
-        snprintf(stVdecSend[i].cFileName, sizeof(stVdecSend[i].cFileName), "rtsp://192.168.2.148:8554/live/t1060");
+        snprintf(stVdecSend[i].cFileName, sizeof(stVdecSend[i].cFileName), "rtsp://admin:admin@192.168.19.101:554/cam/realmonitor?channel=1&subtype=0");
         stVdecSend[i].enType = astSampleVdec[i].enType;
         stVdecSend[i].s32StreamMode = astSampleVdec[i].enMode;
         stVdecSend[i].s32ChnId = i;
@@ -682,15 +637,25 @@ HI_S32 SAMPLE_RTSP_VDEC_VPSS(HI_VOID) {
         stVdecSend[i].s32MilliSec = 0;
         stVdecSend[i].s32MinBufSize = (astSampleVdec[i].u32Width * astSampleVdec[i].u32Height * 3) >> 1;
     }
-    SAMPLE_COMM_VDEC_StartSendStream(u32VdecChnNum, &stVdecSend[0], &VdecThread[0]);
 
+    SAMPLE_COMM_VDEC_StartSendStream(u32VdecChnNum, stVdecSend, VdecThread);
+
+    iveWorkerS.frameQueue = &frameQueue;
+    iveWorkerS.imageQueue = &imageQueue;
+
+    SAMPLE_COMM_VDEC_StartIve(u32IveChnNum, &iveWorkerS, IveThread);
+
+    nnieWorkerS.imageQueue = &imageQueue;
+    nnieWorkerS.s_stSsdNnieParam = &s_stSsdNnieParam;
+
+    SAMPLE_COMM_VDEC_StartNnie(u32NnieChnNum, &nnieWorkerS, NnieThread);
 
     while (1)
     {
         FD_ZERO(&read_fds);
-        for (i = 0; i < u32VdecChnNum; i++)
+        for (channel_index = 0; channel_index < u32VdecChnNum; channel_index++)
         {
-            FD_SET(VdecFd[i], &read_fds);
+            FD_SET(VdecFd[channel_index], &read_fds);
         }
 
         TimeoutVal.tv_sec  = 2;
@@ -704,12 +669,12 @@ HI_S32 SAMPLE_RTSP_VDEC_VPSS(HI_VOID) {
         }
         else if (s32Ret == 0)
         {
-            SAMPLE_PRT("get venc stream time out, exit thread\n");
+            SAMPLE_PRT("get vdec stream time out, exit thread\n");
             continue;
         }
-        for (i = 0; i < u32VdecChnNum; i++)
+        for (channel_index = 0; channel_index < u32VdecChnNum; channel_index++)
         {
-            if (FD_ISSET(VdecFd[i], &read_fds))
+            if (FD_ISSET(VdecFd[channel_index], &read_fds))
             {
 #ifdef SAVE
                 FILE * pFile = fopen("123.yuv", "wb");
@@ -719,15 +684,11 @@ HI_S32 SAMPLE_RTSP_VDEC_VPSS(HI_VOID) {
                 VIDEO_FRAME_INFO_S *video_frame_info_s = new VIDEO_FRAME_INFO_S;
                 memset(video_frame_info_s, 0, sizeof(VIDEO_FRAME_INFO_S));
 
-                s32Ret = HI_MPI_VPSS_GetChnFrame(VpssGrp, 0, video_frame_info_s, 0);
-                //printf("channel %d vdec get frame return = %x \n",i, s32Ret);
+                s32Ret = HI_MPI_VPSS_GetChnFrame(channel_index, 0, video_frame_info_s, 0);
+
                 if(s32Ret == HI_SUCCESS)
                 {
-                    struct timeval start;
-                    struct timeval end;
-                    gettimeofday(&start, NULL);
-                    //u32Size = (video_frame_info_s->stVFrame.u32Stride[0]) * (video_frame_info_s->stVFrame.u32Height) * 3 / 2;
-                    //video_frame_info_s->stVFrame.u64VirAddr[0] = (HI_U64)HI_MPI_SYS_Mmap(video_frame_info_s->stVFrame.u64PhyAddr[0], u32Size);
+                    frameQueue.push(video_frame_info_s);
 /*
                     printf("physical addr = %llx \n", video_frame_info_s->stVFrame.u64PhyAddr[0]);
                     printf("virtual addr = %llx \n", video_frame_info_s->stVFrame.u64VirAddr[0]);
@@ -737,80 +698,7 @@ HI_S32 SAMPLE_RTSP_VDEC_VPSS(HI_VOID) {
                     printf("stride 0 = %d \n", video_frame_info_s->stVFrame.u32Stride[0]);
                     printf("stride 1 = %d \n", video_frame_info_s->stVFrame.u32Stride[1]);
 */
-                    IVE_IMAGE_S *pstImg = new IVE_IMAGE_S;
 
-                    pstImg->enType = IVE_IMAGE_TYPE_U8C3_PLANAR;
-                    pstImg->u32Width = video_frame_info_s->stVFrame.u32Width;
-                    pstImg->u32Height = video_frame_info_s->stVFrame.u32Height;
-                    pstImg->au32Stride[0] = pstImg->u32Width;
-
-                    u32Size = pstImg->au32Stride[0] * pstImg->u32Height *3;
-
-                    s32Ret = HI_MPI_SYS_MmzAlloc(&pstImg->au64PhyAddr[0], (HI_VOID**)&pstImg->au64VirAddr[0], NULL, HI_NULL, u32Size);
-                    if (s32Ret != HI_SUCCESS)
-                    {
-                        SAMPLE_PRT("Mmz Alloc fail,Error(%#x)\n", s32Ret);
-                        return s32Ret;
-                    }
-                    pstImg->au32Stride[1] = pstImg->u32Width;
-                    pstImg->au32Stride[2] = pstImg->u32Width;
-                    pstImg->au64PhyAddr[1] = pstImg->au64PhyAddr[0] + pstImg->u32Width * pstImg->u32Height;
-                    pstImg->au64VirAddr[1] = pstImg->au64VirAddr[0] + pstImg->u32Width * pstImg->u32Height;
-                    pstImg->au64PhyAddr[2] = pstImg->au64PhyAddr[0] + pstImg->u32Width * pstImg->u32Height *2;
-                    pstImg->au64VirAddr[2] = pstImg->au64VirAddr[0] + pstImg->u32Width * pstImg->u32Height *2;
-
-                    s32Ret = DGSP420ToBGR24Planar(&(video_frame_info_s->stVFrame), pstImg);
-#ifdef SAVE
-                    HI_U32 u32WidthInBytes = pstImg->u32Width*3;
-                    HI_U32 u32Stride = ALIGN_UP(u32WidthInBytes, 16);
-
-                    HI_U8 * pUserPageAddr = (HI_U8*) pstImg->au64VirAddr[0];
-                    //printf("color space transform s32Ret=0x%x \n", s32Ret);
-                    if (HI_NULL != pUserPageAddr)
-                    {
-                        //printf("%s %d:HI_MPI_SYS_Mmap fail!!! u32Size=%d\n",__func__, __LINE__,u32Size);
-                        fprintf(stderr, "saving......RGB..%d x %d......", pstImg->u32Width, pstImg->u32Height);
-                        fflush(stderr);
-
-                        HI_U8 *pTmp = pUserPageAddr;
-                        for (i = 0; i < pstImg->u32Height; i++, pTmp += u32Stride)
-                        {
-                            fwrite(pTmp, u32WidthInBytes, 1, pFile_bgr_1080p);
-                        }
-                        fflush(pFile_bgr_1080p);
-
-                        fprintf(stderr, "done!\n");
-                        fflush(stderr);
-                    }
-#endif
-                    IVE_IMAGE_S *pstDstImg = new IVE_IMAGE_S;
-
-                    pstDstImg->enType = IVE_IMAGE_TYPE_U8C3_PLANAR;
-                    pstDstImg->u32Width = 384;
-                    pstDstImg->u32Height = 216;
-                    pstDstImg->au32Stride[0] = IVE_CalcStride(pstDstImg->u32Width, IVE_ALIGN);
-
-                    u32Size = pstDstImg->au32Stride[0] * pstDstImg->u32Height * 3;
-                    s32Ret = HI_MPI_SYS_MmzAlloc(&pstDstImg->au64PhyAddr[0], (HI_VOID**)&pstDstImg->au64VirAddr[0], NULL, HI_NULL, u32Size);
-                    if (s32Ret != HI_SUCCESS)
-                    {
-                        SAMPLE_PRT("Mmz Alloc fail,Error(%#x)\n", s32Ret);
-                        return s32Ret;
-                    }
-                    pstDstImg->au32Stride[1] = pstDstImg->au32Stride[0];
-                    pstDstImg->au32Stride[2] = pstDstImg->au32Stride[0];
-                    pstDstImg->au64PhyAddr[1] = pstDstImg->au64PhyAddr[0] + pstDstImg->au32Stride[0] * pstDstImg->u32Height;
-                    pstDstImg->au64VirAddr[1] = pstDstImg->au64VirAddr[0] + pstDstImg->au32Stride[0] * pstDstImg->u32Height;
-                    pstDstImg->au64PhyAddr[2] = pstDstImg->au64PhyAddr[0] + pstDstImg->au32Stride[0] * pstDstImg->u32Height *2;
-                    pstDstImg->au64VirAddr[2] = pstDstImg->au64VirAddr[0] + pstDstImg->au32Stride[0] * pstDstImg->u32Height *2;
-
-                    s32Ret = DGIveResize(pstImg, pstDstImg);
-
-                    if (s32Ret != HI_SUCCESS)
-                    {
-                        SAMPLE_PRT("Resize fail,Error(%#x)\n", s32Ret);
-                        return s32Ret;
-                    }
 #ifdef SAVE
                     u32WidthInBytes = pstDstImg->u32Width*3;
                     u32Stride = ALIGN_UP(u32WidthInBytes, 16);
@@ -834,176 +722,10 @@ HI_S32 SAMPLE_RTSP_VDEC_VPSS(HI_VOID) {
                         fflush(stderr);
                     }
 #endif
-                    s_stSsdNnieParam.astSegData[0].astSrc[0].u64VirAddr = pstDstImg->au64VirAddr[0];
-                    s_stSsdNnieParam.astSegData[0].astSrc[0].u64PhyAddr = pstDstImg->au64PhyAddr[0];
-                    s_stSsdNnieParam.astSegData[0].astSrc[0].u32Stride = pstDstImg->au32Stride[0];
 
-                    HI_BOOL bFinish = HI_FALSE;
-                    SVP_NNIE_HANDLE hSvpNnieHandle = 0;
-                    s32Ret = HI_MPI_SVP_NNIE_Forward(&hSvpNnieHandle, s_stSsdNnieParam.astSegData[0].astSrc, s_stSsdNnieParam.pstModel,
-                                            s_stSsdNnieParam.astSegData[0].astDst,
-                                            &s_stSsdNnieParam.astForwardCtrl[0], HI_TRUE);
-                    if (s32Ret != HI_SUCCESS)
-                    {
-                        SAMPLE_PRT("Forward fail,Error(%#x)\n", s32Ret);
-                        return s32Ret;
-                    }
-
-                    if(HI_TRUE)
-                    {
-                        /*Wait NNIE finish*/
-                        while(HI_ERR_SVP_NNIE_QUERY_TIMEOUT == (s32Ret = HI_MPI_SVP_NNIE_Query(s_stSsdNnieParam.astForwardCtrl[0].enNnieId,
-                                                                                               hSvpNnieHandle, &bFinish, HI_TRUE)))
-                        {
-                            usleep(100);
-                            SAMPLE_SVP_TRACE(SAMPLE_SVP_ERR_LEVEL_INFO,
-                                             "HI_MPI_SVP_NNIE_Query Query timeout!\n");
-                        }
-                    }
-
-                    bFinish = HI_FALSE;
-
-                    for(i = 0; i < s_stSsdNnieParam.astForwardCtrl[0].u32DstNum; i++)
-                    {
-                        SAMPLE_COMM_SVP_FlushCache(s_stSsdNnieParam.astSegData[0].astDst[i].u64PhyAddr,
-                                                   (HI_VOID *) s_stSsdNnieParam.astSegData[0].astDst[i].u64VirAddr,
-                                                   s_stSsdNnieParam.astSegData[0].astDst[i].u32Num*
-                                                           s_stSsdNnieParam.astSegData[0].astDst[i].unShape.stWhc.u32Chn*
-                                                           s_stSsdNnieParam.astSegData[0].astDst[i].unShape.stWhc.u32Height*
-                                                           s_stSsdNnieParam.astSegData[0].astDst[i].u32Stride);
-                    }
-
-                    (HI_VOID)HI_MPI_SYS_MmzFree(pstImg->au64PhyAddr[0], (void *) (pstImg->au64VirAddr[0]));
-
-                    (HI_VOID)HI_MPI_SYS_MmzFree(pstDstImg->au64PhyAddr[0], (void *) (pstDstImg->au64VirAddr[0]));
-
-                    delete pstImg;
-                    pstImg = nullptr;
-                    delete pstDstImg;
-                    pstDstImg = nullptr;
-
-                    HI_S32 s32Ret = HI_SUCCESS;
-
-                    std::vector<int>min_sizes = {10, 15, 20, 25, 35, 40};
-                    std::vector<float>aspect_ratio_vec = {1.0, 1.25};
-                    std::vector<float>variance_list = {0.1, 0.1, 0.2, 0.2};
-                    float offset = 0.5;
-                    int step = 8;
-                    float nms_thres = 0.35;
-
-                    SVP_BLOB_S conv_loc_ = s_stSsdNnieParam.astSegData[0].astDst[0];
-                    SVP_BLOB_S conv_conf_ = s_stSsdNnieParam.astSegData[0].astDst[1];
-
-                    HI_S32* cls_cpu = (HI_S32 *)conv_conf_.u64VirAddr;
-                    HI_S32* reg_cpu = (HI_S32 *)conv_loc_.u64VirAddr;
-
-                    int cls_height = conv_conf_.unShape.stWhc.u32Height;
-                    int cls_width = conv_conf_.unShape.stWhc.u32Width;
-                    int reg_width = conv_loc_.unShape.stWhc.u32Width;
-                    int cstep = conv_conf_.u32Stride * conv_conf_.unShape.stWhc.u32Height / 4;
-
-                    int aspect_ratio_num = aspect_ratio_vec.size();
-                    int anchor_number = min_sizes.size() * aspect_ratio_vec.size();
-                    float conf_thres_=0.4f;
-                    std::vector<struct Bbox> vbbox;
-
-                    float log_thres[anchor_number];
-                    for (int i = 0; i < anchor_number; i++)
-                    {
-                        log_thres[i] = log(conf_thres_ / (1.0 - conf_thres_));
-                    }
-                    float pred_w, pred_h, center_x, center_y, pred_x, pred_y, raw_pred_x1,
-                            raw_pred_y1, raw_pred_w, raw_pred_h, prior_center_x, prior_center_y;
-                    for (int j = 0; j < anchor_number; j++)
-                    {
-                        float aspect_ratio = aspect_ratio_vec[j % aspect_ratio_num];
-                        float prior_h = min_sizes[j / aspect_ratio_num] * sqrt(aspect_ratio);
-                        float prior_w = min_sizes[j / aspect_ratio_num] / sqrt(aspect_ratio);
-
-                        for (int y_index = 0; y_index < cls_height; y_index++)
-                        {
-                            for (int x_index = 0; x_index < cls_width; x_index++)
-                            {
-                                float x0 = cls_cpu[2 * j * cstep + y_index * cls_width + x_index] / 4096.0;
-                                float x1 = cls_cpu[(2 * j + 1) * cstep + y_index * cls_width + x_index] / 4096.0;
-                                if (x1 - x0 > log_thres[j])
-                                {
-                                    raw_pred_x1 = reg_cpu[j * 4 * cstep + y_index * reg_width + x_index] / 4096.0;
-                                    raw_pred_y1 = reg_cpu[(j * 4 + 1) * cstep + y_index * reg_width + x_index] / 4096.0;
-                                    raw_pred_w = reg_cpu[(j * 4 + 2) * cstep + y_index * reg_width + x_index] / 4096.0;
-                                    raw_pred_h = reg_cpu[(j * 4 + 3) * cstep + y_index * reg_width + x_index] / 4096.0;
-
-                                    prior_center_x = (x_index + offset) * step;
-                                    prior_center_y = (y_index + offset) * step;
-                                    center_x = variance_list[0] * raw_pred_x1 * prior_w + prior_center_x;
-                                    center_y = variance_list[1] * raw_pred_y1 * prior_h + prior_center_y;
-                                    pred_w = (exp(variance_list[2] * raw_pred_w) * prior_w);
-                                    pred_h = (exp(variance_list[3] * raw_pred_h) * prior_h);
-                                    pred_x = (center_x - pred_w / 2.);
-                                    pred_y = (center_y - pred_h / 2.);
-
-                                    struct Bbox bbox;
-                                    bbox.confidence = 1.0 / (1.0 + exp(x0 - x1));
-                                    bbox.rect = cv::Rect_<float>(pred_x, pred_y, pred_w, pred_h);
-                                    bbox.deleted = false;
-                                    vbbox.push_back(bbox);
-                                }
-                            }
-                        }
-                    }
-
-                    if (vbbox.size() != 0)
-                    {
-                        nms(vbbox, nms_thres);
-                    }
-
-                    std::vector<struct Bbox> final_vbbox;
-
-                    int u16Num = 0;
-                    SAMPLE_RECT_ARRAY_S sample_rect_array_s;
-                    for(int i=0;i<vbbox.size();i++)
-                    {
-                        if(!vbbox[i].deleted)
-                        {
-
-                            //final_vbbox.push_back(vbbox[i]);
-                            std::cout << vbbox[i].rect.x << "  " << vbbox[i].rect.y << "  " << vbbox[i].rect.width << "  " << vbbox[i].rect.height << std::endl;
-                            sample_rect_array_s.astRect[u16Num].astPoint[0].s32X = (HI_U32)(vbbox[i].rect.x * 5) & (~1);
-                            sample_rect_array_s.astRect[u16Num].astPoint[0].s32Y = (HI_U32)(vbbox[i].rect.y * 5) & (~1);
-
-                            sample_rect_array_s.astRect[u16Num].astPoint[1].s32X = (HI_U32)((vbbox[i].rect.x + vbbox[i].rect.width) * 5) & (~1);
-                            sample_rect_array_s.astRect[u16Num].astPoint[1].s32Y = (HI_U32)(vbbox[i].rect.y * 5) & (~1);
-
-                            sample_rect_array_s.astRect[u16Num].astPoint[2].s32X = (HI_U32)((vbbox[i].rect.x + vbbox[i].rect.width) * 5) & (~1);
-                            sample_rect_array_s.astRect[u16Num].astPoint[2].s32Y = (HI_U32)((vbbox[i].rect.y + vbbox[i].rect.height) * 5) & (~1);
-
-                            sample_rect_array_s.astRect[u16Num].astPoint[3].s32X = (HI_U32)(vbbox[i].rect.x * 5) & (~1);
-                            sample_rect_array_s.astRect[u16Num].astPoint[3].s32Y = (HI_U32)((vbbox[i].rect.y + vbbox[i].rect.height) * 5) & (~1);
-                            u16Num += 1;
-                        }
-                    }
-                    sample_rect_array_s.u16Num = u16Num;
-
-                    printf("detected face = %d\n", u16Num);
-
-                    SAMPLE_COMM_VGS_FillRect(video_frame_info_s, &sample_rect_array_s, 0x0000FF00);
-
-                    //FILE *pFile = fopen("123.yuv", "wb");
-                    //SAMPLE_COMM_VDEC_SaveYUVFile_Linear8Bit(pFile, &(video_frame_info_s->stVFrame));
-
-                    s32Ret = HI_MPI_VENC_SendFrame(VeH264Chn, video_frame_info_s, 0);
-                    SAMPLE_CHECK_EXPR_GOTO(HI_SUCCESS!=s32Ret, END5, "HI_MPI_VENC_SendFrame failed, Error(%#x)!\n", s32Ret);
-
-
-                    //HI_MPI_SYS_Munmap((void *)(video_frame_info_s->stVFrame.u64VirAddr[0]), u32Size);
-                    gettimeofday(&end, NULL);
-                    float time_use=(end.tv_sec-start.tv_sec)*1000000+(end.tv_usec-start.tv_usec);//微秒
-                    //printf("post process time is %f us \n",time_use);
-                    //printf("one round\n");
+//                    FILE *pFile = fopen("123.yuv", "wb");
+//                    SAMPLE_COMM_VDEC_SaveYUVFile_Linear8Bit(pFile, &(video_frame_info_s->stVFrame));
                 }
-                HI_MPI_VPSS_ReleaseChnFrame(VpssGrp, 0, video_frame_info_s);
-                delete video_frame_info_s;
-                video_frame_info_s = nullptr;
 #ifdef SAVE
                 fclose(pFile);
                 fclose(pFile_bgr);
@@ -1017,7 +739,6 @@ HI_S32 SAMPLE_RTSP_VDEC_VPSS(HI_VOID) {
     SAMPLE_COMM_VDEC_CmdCtrl(u32VdecChnNum, &stVdecSend[0], &VdecThread[0]);
 
     SAMPLE_COMM_VDEC_StopSendStream(u32VdecChnNum, &stVdecSend[0], &VdecThread[0]);
-
 
 END5:
     for(i=0; i<u32VdecChnNum; i++)
@@ -1033,8 +754,9 @@ END4:
     for(i = VpssGrp; i >= 0; i--)
     {
         VpssGrp = i;
-        SAMPLE_COMM_VPSS_Stop(VpssGrp, &abChnEnable[0]);
+        SAMPLE_COMM_VPSS_Stop(VpssGrp, abChnEnable);
     }
+
 END3:
     SAMPLE_COMM_VDEC_Stop(u32VdecChnNum);
 
@@ -1055,43 +777,14 @@ int main(int argc, char *argv[])
 {
     HI_S32 s32Ret = HI_SUCCESS;
 
-    if ((argc < 2) || (1 != strlen(argv[1])))
-    {
-        printf("\nInvaild input!  For examples:\n");
-        SAMPLE_VDEC_Usage(argv[0]);
-        return HI_FAILURE;
-    }
-
-    if ((argc > 2) && ('1' == *argv[2]))
-    {
-        g_enIntfSync = VO_OUTPUT_1080P30;
-    }
-    else
-    {
-        g_enIntfSync = VO_OUTPUT_3840x2160_30;
-    }
-
     signal(SIGINT, SAMPLE_VDEC_HandleSig);
     signal(SIGTERM, SAMPLE_VDEC_HandleSig);
 
     /******************************************
      choose the case
     ******************************************/
-    switch (*argv[1])
-    {
-        case '0':
-        {
-            s32Ret = SAMPLE_RTSP_VDEC_VPSS();
-            break;
-        }
-        default :
-        {
-            SAMPLE_PRT("the index is invaild!\n");
-            SAMPLE_VDEC_Usage(argv[0]);
-            s32Ret = HI_FAILURE;
-            break;
-        }
-    }
+
+    s32Ret = SAMPLE_RTSP_VDEC_VPSS();
 
     if (HI_SUCCESS == s32Ret)
     {
