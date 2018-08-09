@@ -33,17 +33,21 @@ HI_VOID * SAMPLE_COMM_VDEC_NNIE(HI_VOID *pArgs)
 {
     NNIE_WORKER_S *nnie_worker_s = (NNIE_WORKER_S *)pArgs;
 
-    IVE_IMAGE_S * pstDstImg;
+    pair<std::pair<HI_U32, VIDEO_FRAME_INFO_S *>, IVE_IMAGE_S *> pairs;
+
     HI_S32 s32Ret;
-    HI_U32 u32Size;
 
     while (1)
     {
-        nnie_worker_s->imageQueue->pop(pstDstImg);
+        if(!(nnie_worker_s->pipeline->try_pop(pairs)))
+        {
+            usleep(1000);
+            continue;
+        }
 
-        nnie_worker_s->s_stSsdNnieParam->astSegData[0].astSrc[0].u64VirAddr = pstDstImg->au64VirAddr[0];
-        nnie_worker_s->s_stSsdNnieParam->astSegData[0].astSrc[0].u64PhyAddr = pstDstImg->au64PhyAddr[0];
-        nnie_worker_s->s_stSsdNnieParam->astSegData[0].astSrc[0].u32Stride = pstDstImg->au32Stride[0];
+        nnie_worker_s->s_stSsdNnieParam->astSegData[0].astSrc[0].u64VirAddr = pairs.second->au64VirAddr[0];
+        nnie_worker_s->s_stSsdNnieParam->astSegData[0].astSrc[0].u64PhyAddr = pairs.second->au64PhyAddr[0];
+        nnie_worker_s->s_stSsdNnieParam->astSegData[0].astSrc[0].u32Stride = pairs.second->au32Stride[0];
 
         HI_BOOL bFinish = HI_FALSE;
         SVP_NNIE_HANDLE hSvpNnieHandle = 0;
@@ -58,7 +62,6 @@ HI_VOID * SAMPLE_COMM_VDEC_NNIE(HI_VOID *pArgs)
 
         if(HI_TRUE)
         {
-            /*Wait NNIE finish*/
             while(HI_ERR_SVP_NNIE_QUERY_TIMEOUT == (s32Ret = HI_MPI_SVP_NNIE_Query(nnie_worker_s->s_stSsdNnieParam->astForwardCtrl[0].enNnieId,
                                                                                    hSvpNnieHandle, &bFinish, HI_TRUE)))
             {
@@ -70,12 +73,11 @@ HI_VOID * SAMPLE_COMM_VDEC_NNIE(HI_VOID *pArgs)
 
         bFinish = HI_FALSE;
 
+        (HI_VOID)HI_MPI_SYS_MmzFree(pairs.second->au64PhyAddr[0], (void *) (pairs.second->au64VirAddr[0]));
 
-        (HI_VOID)HI_MPI_SYS_MmzFree(pstDstImg->au64PhyAddr[0], (void *) (pstDstImg->au64VirAddr[0]));
 
-
-        delete pstDstImg;
-        pstDstImg = nullptr;
+        delete pairs.second;
+        pairs.second = nullptr;
 
         std::vector<int>min_sizes = {10, 15, 20, 25, 35, 40};
         std::vector<float>aspect_ratio_vec = {1.0, 1.25};
@@ -175,10 +177,21 @@ HI_VOID * SAMPLE_COMM_VDEC_NNIE(HI_VOID *pArgs)
         }
         sample_rect_array_s.u16Num = u16Num;
 
-        SAMPLE_COMM_VGS_FillRect(video_frame_info_s, &sample_rect_array_s, 0x0000FF00);
+//        SAMPLE_COMM_VGS_FillRect(pairs.first, &sample_rect_array_s, 0x0000FF00);
+//
+//        s32Ret = HI_MPI_VENC_SendFrame(0, pairs.first, -1);
+//        if (s32Ret != HI_SUCCESS)
+//        {
+//            SAMPLE_PRT("Venc fail,Error(%#x)\n", s32Ret);
+//            return nullptr;
+//        }
 
-        printf("channel = %d, detected face = %d\n", 0, u16Num);
-
+        printf("channel = %d, detected face = %d\n", pairs.first.first, u16Num);
+        HI_MPI_VPSS_ReleaseChnFrame(0, 0, pairs.first.second);
+        delete pairs.first.second;
+        pairs.first.second = nullptr;
+        delete pairs.second;
+        pairs.second = nullptr;
     }
     printf("\033[Ive thread return ...  \033[0;39m\n");
     fflush(stdout);

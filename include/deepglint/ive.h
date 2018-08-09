@@ -8,8 +8,8 @@
 
 typedef struct DG_IVE_WORKER_S
 {
-    tbb::concurrent_bounded_queue<VIDEO_FRAME_INFO_S *> *frameQueue;
-    tbb::concurrent_bounded_queue<IVE_IMAGE_S *> *imageQueue;
+    tbb::concurrent_bounded_queue<std::pair<HI_U32, VIDEO_FRAME_INFO_S *>> *frameQueue;
+    tbb::concurrent_bounded_queue<std::pair<std::pair<HI_U32, VIDEO_FRAME_INFO_S *>, IVE_IMAGE_S *>> *pipeline;
 }IVE_WORKER_S;
 
 HI_VOID *SAMPLE_COMM_VDEC_IVE(HI_VOID *pArgs);

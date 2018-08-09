@@ -8,25 +8,28 @@ HI_VOID *SAMPLE_COMM_VDEC_IVE(HI_VOID *pArgs)
 
     IVE_WORKER_S* ive_worker_s = (IVE_WORKER_S *)pArgs;
 
+    pair<HI_U32, VIDEO_FRAME_INFO_S *> pairs;
 
-    VIDEO_FRAME_INFO_S * video_frame_info_s;
     HI_S32 s32Ret;
     HI_U32 u32Size;
 
+    struct timeval tv_begin;
+    struct timeval tv_end;
+    float   elasped;
+
     while (1)
     {
-        if(!(ive_worker_s->frameQueue->try_pop(video_frame_info_s)))
+        if(!(ive_worker_s->frameQueue->try_pop(pairs)))
         {
-            sleep(1);
-            printf("ive wait \n");
+            usleep(1000);
             continue;
         }
 
         IVE_IMAGE_S *pstImg = new IVE_IMAGE_S;
 
         pstImg->enType = IVE_IMAGE_TYPE_U8C3_PLANAR;
-        pstImg->u32Width = video_frame_info_s->stVFrame.u32Width;
-        pstImg->u32Height = video_frame_info_s->stVFrame.u32Height;
+        pstImg->u32Width = pairs.second->stVFrame.u32Width;
+        pstImg->u32Height = pairs.second->stVFrame.u32Height;
         pstImg->au32Stride[0] = pstImg->u32Width;
 
         u32Size = pstImg->au32Stride[0] * pstImg->u32Height *3;
@@ -44,29 +47,14 @@ HI_VOID *SAMPLE_COMM_VDEC_IVE(HI_VOID *pArgs)
         pstImg->au64PhyAddr[2] = pstImg->au64PhyAddr[0] + pstImg->u32Width * pstImg->u32Height *2;
         pstImg->au64VirAddr[2] = pstImg->au64VirAddr[0] + pstImg->u32Width * pstImg->u32Height *2;
 
-        IVE_IMAGE_S *pstDstImg = new IVE_IMAGE_S;
+        s32Ret = DGSP420ToBGR24Planar(&(pairs.second->stVFrame), pstImg);
 
-        pstDstImg->enType = IVE_IMAGE_TYPE_U8C3_PLANAR;
-        pstDstImg->u32Width = 384;
-        pstDstImg->u32Height = 216;
-        pstDstImg->au32Stride[0] = IVE_CalcStride(pstDstImg->u32Width, IVE_ALIGN);
-
-        u32Size = pstDstImg->au32Stride[0] * pstDstImg->u32Height * 3;
-
-        s32Ret = HI_MPI_SYS_MmzAlloc(&pstDstImg->au64PhyAddr[0], (HI_VOID**)&pstDstImg->au64VirAddr[0], NULL, HI_NULL, u32Size);
         if (s32Ret != HI_SUCCESS)
         {
-            SAMPLE_PRT("Mmz Alloc fail,Error(%#x)\n", s32Ret);
+            SAMPLE_PRT("Csc fail,Error(%#x)\n", s32Ret);
             return nullptr;
         }
-        pstDstImg->au32Stride[1] = pstDstImg->au32Stride[0];
-        pstDstImg->au32Stride[2] = pstDstImg->au32Stride[0];
-        pstDstImg->au64PhyAddr[1] = pstDstImg->au64PhyAddr[0] + pstDstImg->au32Stride[0] * pstDstImg->u32Height;
-        pstDstImg->au64VirAddr[1] = pstDstImg->au64VirAddr[0] + pstDstImg->au32Stride[0] * pstDstImg->u32Height;
-        pstDstImg->au64PhyAddr[2] = pstDstImg->au64PhyAddr[0] + pstDstImg->au32Stride[0] * pstDstImg->u32Height *2;
-        pstDstImg->au64VirAddr[2] = pstDstImg->au64VirAddr[0] + pstDstImg->au32Stride[0] * pstDstImg->u32Height *2;
 
-        s32Ret = DGSP420ToBGR24Planar(&(video_frame_info_s->stVFrame), pstImg);
 #ifdef SAVE
         HI_U32 u32WidthInBytes = pstImg->u32Width*3;
                     HI_U32 u32Stride = ALIGN_UP(u32WidthInBytes, 16);
@@ -90,23 +78,7 @@ HI_VOID *SAMPLE_COMM_VDEC_IVE(HI_VOID *pArgs)
                         fflush(stderr);
                     }
 #endif
-        s32Ret = DGIveResize(pstImg, pstDstImg);
-
-        if (s32Ret != HI_SUCCESS)
-        {
-            SAMPLE_PRT("Resize fail,Error(%#x)\n", s32Ret);
-            return nullptr;
-        }
-
-        ive_worker_s->imageQueue->push(pstDstImg);
-
-        (HI_VOID)HI_MPI_SYS_MmzFree(pstImg->au64PhyAddr[0], (void *) (pstImg->au64VirAddr[0]));
-
-        HI_MPI_VPSS_ReleaseChnFrame(0, 0, video_frame_info_s);
-        delete video_frame_info_s;
-        video_frame_info_s = nullptr;
-        delete pstImg;
-        pstImg = nullptr;
+        ive_worker_s->pipeline->push(std::make_pair(pairs, pstImg));
     }
     printf("\033[Ive thread return ...  \033[0;39m\n");
     fflush(stdout);

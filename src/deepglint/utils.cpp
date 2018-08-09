@@ -1,16 +1,16 @@
 #include "utils.h"
 
-static void bench_begin()
-{
-    gettimeofday(&tv_begin, NULL);
-}
-
-static void bench_end(const char *args)
-{
-    gettimeofday(&tv_end, NULL);
-    elasped = ((tv_end.tv_sec - tv_begin.tv_sec) * 1000000.0f + tv_end.tv_usec - tv_begin.tv_usec) / 1000.0f;
-     fprintf(stderr, "%.2fms   %s\n", elasped, args);
-}
+//static void bench_begin()
+//{
+//    gettimeofday(&tv_begin, NULL);
+//}
+//
+//static void bench_end(const char *args)
+//{
+//    gettimeofday(&tv_end, NULL);
+//    elasped = ((tv_end.tv_sec - tv_begin.tv_sec) * 1000000.0f + tv_end.tv_usec - tv_begin.tv_usec) / 1000.0f;
+//    printf("time spent = %f", elasped);
+//}
 
 HI_U16 IVE_CalcStride(HI_U32 u32Width, HI_U8 u8Align)
 {

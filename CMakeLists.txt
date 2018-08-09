@@ -8,6 +8,8 @@ project(vdec)
 set(CMAKE_C_COMPILER aarch64-himix100-linux-gcc)
 set(CMAKE_CXX_COMPILER aarch64-himix100-linux-g++)
 
+set(CMAKE_BUILD_TYPE debug)
+
 set(CMAKE_CXX_FLAGS_DEBUG   "$ENV{CXXFLAGS} -O0 -g -ggdb")
 set(CMAKE_CXX_FLAGS_RELEASE "$ENV{CXXFLAGS} -O3 -DNDEBUG")
 set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -Wall -std=c++11 -fpermissive")
@@ -31,6 +33,8 @@ add_definitions(-DSENSOR6_TYPE=SONY_IMX477_MIPI_8M_30FPS_12BIT)
 add_definitions(-DSENSOR7_TYPE=SONY_IMX477_MIPI_8M_30FPS_12BIT)
 
 include_directories(include/tbb)
+include_directories(include/crow)
+include_directories(include/boost)
 include_directories(include/hisi)
 include_directories(include/opencv)
 include_directories(include/ffmpeg)
@@ -40,6 +44,7 @@ link_directories(lib/tbb)
 link_directories(lib/hisi)
 link_directories(lib/ffmpeg)
 link_directories(lib/opencv)
+link_directories(lib/boost)
 
 add_subdirectory(src/commom)
 add_subdirectory(src/deepglint)
@@ -51,4 +56,4 @@ add_executable(NeverMore NeverMore.cpp)
 
 target_link_libraries(NeverMore deepglint hisi_common libnnie.a libmpi.a libive.a libhdmi.a libVoiceEngine.a libupvqe.a libdnvqe.a libsecurec.a
         libavdevice.a libavformat.a libavcodec.a libavfilter.a libavutil.a libswresample.a libopencv_core.a libopencv_highgui.a
-        libzlib.a -ltbb -lpthread -lm -ldl -lstdc++)
+        libzlib.a -ltbb -lboost_system -lpthread -lm -ldl -lstdc++)

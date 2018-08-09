@@ -123,7 +123,14 @@ static int TimeOutCallBack(void* ctx)
     struct timeval currenttime;
     gettimeofday(&currenttime, NULL);
 
-    return ((currenttime.tv_sec) - (basetime->tv_sec)) >= MAX_TIMEOUT ? 1 :0;
+    if(((currenttime.tv_sec) - (basetime->tv_sec)) >= MAX_TIMEOUT)
+    {
+        printf("time out \n");
+        return 1;
+    } else
+    {
+        return 0;
+    }
 }
 
 HI_S32 SAMPLE_COMM_VDEC_InitVBPool(HI_U32 ChnNum, SAMPLE_VDEC_ATTR *pastSampleVdec)
@@ -324,6 +331,10 @@ HI_VOID * SAMPLE_COMM_VDEC_SendStream(HI_VOID *pArgs)
     AVDictionary *avdic = NULL;
     AVPacket pkt;
 
+    struct timeval tv_begin;
+    struct timeval tv_end;
+    float  elasped;
+
     av_register_all();
 
     s32Ret = avformat_network_init();
@@ -334,8 +345,8 @@ HI_VOID * SAMPLE_COMM_VDEC_SendStream(HI_VOID *pArgs)
     s32Ret = av_dict_set(&avdic, option_mean_key, option_mean_value, 0);
     MACRO_CHECK_RETURN(s32Ret);
 
-    s32Ret = av_dict_set(&avdic, option_delay_key, option_delay_value, 0);
-    MACRO_CHECK_RETURN(s32Ret);
+//    s32Ret = av_dict_set(&avdic, option_delay_key, option_delay_value, 0);
+//    MACRO_CHECK_RETURN(s32Ret);
 
     gettimeofday(&basetime, NULL);
     ifmt_ctx->interrupt_callback.callback = TimeOutCallBack;
@@ -362,14 +373,15 @@ HI_VOID * SAMPLE_COMM_VDEC_SendStream(HI_VOID *pArgs)
     {
         if(pkt.stream_index == video_index)
         {
-            stStream.u64PTS       = u64PTS;
+            stStream.u64PTS       = pkt.pts;
             stStream.pu8Addr      = pkt.data;
             stStream.u32Len       = pkt.size;
             stStream.bEndOfFrame  = (pstVdecThreadParam->s32StreamMode==VIDEO_MODE_FRAME)? HI_TRUE: HI_FALSE;
             stStream.bEndOfStream = bEndOfStream;
             stStream.bDisplay     = 1;
         SendAgain:
-            s32Ret=HI_MPI_VDEC_SendStream(pstVdecThreadParam->s32ChnId, &stStream, pstVdecThreadParam->s32MilliSec);
+            s32Ret=HI_MPI_VDEC_SendStream(pstVdecThreadParam->s32ChnId, &stStream, -1);
+            //printf("send stream return = %d \n", s32Ret);
             if( (HI_SUCCESS != s32Ret) && (THREAD_CTRL_START == pstVdecThreadParam->eThreadCtrl) )
             {
                 usleep(pstVdecThreadParam->s32IntervalTime);
@@ -380,17 +392,12 @@ HI_VOID * SAMPLE_COMM_VDEC_SendStream(HI_VOID *pArgs)
                 bEndOfStream = HI_FALSE;
                 u64PTS += pstVdecThreadParam->u64PtsIncrease;
             }
-            usleep(pstVdecThreadParam->s32IntervalTime);
+            //usleep(pstVdecThreadParam->s32IntervalTime);
         }
         av_packet_unref(&pkt);
         gettimeofday(&basetime, NULL);
+
     }
-
-    /* send the flag of stream end */
-    memset(&stStream, 0, sizeof(VDEC_STREAM_S) );
-    stStream.bEndOfStream = HI_TRUE;
-    HI_MPI_VDEC_SendStream(pstVdecThreadParam->s32ChnId, &stStream, -1);
-
     printf("\033[0;35m chn %d send steam thread return ...  \033[0;39m\n", pstVdecThreadParam->s32ChnId);
     fflush(stdout);
 

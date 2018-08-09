@@ -18,9 +18,10 @@ struct Bbox{
     int idx;
 };
 
-typedef struct DG_NNIE_WORKER_S{
+typedef struct DG_NNIE_WORKER_S
+{
     SAMPLE_SVP_NNIE_PARAM_S *s_stSsdNnieParam;
-    tbb::concurrent_bounded_queue<IVE_IMAGE_S *> *imageQueue;
+    tbb::concurrent_bounded_queue<std::pair<std::pair<HI_U32, VIDEO_FRAME_INFO_S *>, IVE_IMAGE_S *>> *pipeline;
 }NNIE_WORKER_S;
 
 HI_VOID SAMPLE_COMM_VDEC_StartNnie(HI_S32 s32ChnNum, NNIE_WORKER_S *pstNnieWorker, pthread_t *pNnieThread);

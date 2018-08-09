@@ -12,13 +12,13 @@
 #include <tbb/pipeline.h>
 #include <tbb/concurrent_queue.h>
 
-static struct timeval tv_begin;
-static struct timeval tv_end;
-static long   elasped;
-
-static void bench_begin();
-
-static void bench_end(const char *args);
+//static struct timeval tv_begin;
+//static struct timeval tv_end;
+//static long   elasped;
+//
+//static void bench_begin();
+//
+//static void bench_end(const char *args);
 
 HI_U16 IVE_CalcStride(HI_U32 u32Width, HI_U8 u8Align);
 

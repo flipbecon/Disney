@@ -1,25 +1,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <sys/ioctl.h>
-#include <sys/poll.h>
+#include <sys/epoll.h>
 #include <sys/time.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <pthread.h>
-#include "thread"
+#include <thread>
+#include <string>
 
-
+#include "crow.h"
 #include "utils.h"
 #include "ive.h"
 #include "nnie.h"
-#include "sample_comm.h"
-#include "sample_comm_svp.h"
-#include "sample_comm_nnie.h"
 #include "sample_svp_nnie_software.h"
-
 
 #define IVE_ALIGN 16
 #define INPUT_VIDEO_WIDTH  1920
@@ -27,6 +18,12 @@
 
 using namespace std;
 using namespace tbb;
+
+typedef struct DG_QUEUE_S
+{
+    concurrent_bounded_queue<pair<HI_U32, VIDEO_FRAME_INFO_S *>> *frameQueue;
+    concurrent_bounded_queue<pair<pair<HI_U32, VIDEO_FRAME_INFO_S *>, IVE_IMAGE_S *>> *nniePipelineQueue;
+}QUEUE_S;
 
 HI_VOID SAMPLE_VDEC_HandleSig(HI_S32 signo)
 {
@@ -397,7 +394,6 @@ static HI_S32 SAMPLE_SVP_NNIE_Ssd_SoftwareInit(SAMPLE_SVP_NNIE_CFG_S* pstCfg,
     return s32Ret;
 }
 
-
 /******************************************************************************
 * function : Ssd init
 ******************************************************************************/
@@ -425,24 +421,13 @@ static HI_S32 SAMPLE_SVP_NNIE_Ssd_ParamInit(SAMPLE_SVP_NNIE_CFG_S* pstCfg,
 
 }
 
-HI_VOID SAMPLE_VDEC_Usage(char *sPrgNm)
+HI_VOID * SAMPLE_RTSP_VDEC_VPSS(HI_VOID * args)
 {
-    printf("\n/************************************/\n");
-    printf("Usage : %s <index> \n", sPrgNm);
-    printf("index:\n");
-    printf("\t0:  RTSP-VDEC(H264)-VPSS\n");
-
-    printf("/************************************/\n\n");
-}
-
-VO_INTF_SYNC_E g_enIntfSync = VO_OUTPUT_1080P30;
-
-HI_S32 SAMPLE_RTSP_VDEC_VPSS(HI_VOID) {
     VB_CONFIG_S stVbConfig;
-    HI_S32 k, s32Ret = HI_SUCCESS;
+    HI_S32 s32Ret = HI_SUCCESS;
     VDEC_THREAD_PARAM_S stVdecSend[VDEC_MAX_CHN_NUM];
     SIZE_S stDispSize;
-    HI_U32 i, channel_index, u32VdecChnNum;
+    HI_U32 i, channel_index;
     VPSS_GRP VpssGrp;
     pthread_t VdecThread[2 * VDEC_MAX_CHN_NUM];
     pthread_t IveThread[2 * VDEC_MAX_CHN_NUM];
@@ -455,16 +440,12 @@ HI_S32 SAMPLE_RTSP_VDEC_VPSS(HI_VOID) {
 
     IVE_WORKER_S iveWorkerS;
     NNIE_WORKER_S nnieWorkerS;
-    u32VdecChnNum = 1;
+
+    HI_U32 u32VdecChnNum = 1;
 
     HI_U32 u32IveChnNum = 1;
     HI_U32 u32NnieChnNum = 1;
-    fd_set read_fds;
     HI_S32 VdecFd[VDEC_MAX_CHN_NUM];
-
-    HI_S32 maxfd = 0;
-    struct timeval TimeoutVal;
-    HI_U32 u32Size;
 
     SAMPLE_SVP_NNIE_MODEL_S s_stSsdModel = {0};
     SAMPLE_SVP_NNIE_PARAM_S s_stSsdNnieParam = {0};
@@ -472,14 +453,7 @@ HI_S32 SAMPLE_RTSP_VDEC_VPSS(HI_VOID) {
     SAMPLE_SVP_NNIE_SSD_SOFTWARE_PARAM_S s_stSsdSoftwareParam = {0};
     HI_CHAR *pcModelName = "./source_file/inst_FaceDetect_inst.wk";
 
-    concurrent_bounded_queue<VIDEO_FRAME_INFO_S *> frameQueue;
-    frameQueue.set_capacity(50);
-
-    concurrent_bounded_queue<IVE_IMAGE_S *> imageQueue;
-    imageQueue.set_capacity(50);
-
-//    concurrent_bounded_queue<pair<VIDEO_FRAME_INFO_S *, IVE_IMAGE_S *>> pipelineQueue;
-//    pipelineQueue.set_capacity(50);
+    QUEUE_S *queueS = (QUEUE_S *)args;
 
     /************************************************
     step1:  init SYS, init common VB(for VPSS and VO)
@@ -536,10 +510,10 @@ HI_S32 SAMPLE_RTSP_VDEC_VPSS(HI_VOID) {
     /************************************************
     step4:  start VPSS
     *************************************************/
-    stVpssGrpAttr.u32MaxW = VIDEO_WIDTH;
-    stVpssGrpAttr.u32MaxH = VIDEO_HEIGHT;
-    stVpssGrpAttr.stFrameRate.s32SrcFrameRate = -1;
-    stVpssGrpAttr.stFrameRate.s32DstFrameRate = -1;
+    stVpssGrpAttr.u32MaxW = 384;
+    stVpssGrpAttr.u32MaxH = 216;
+    stVpssGrpAttr.stFrameRate.s32SrcFrameRate = 50;
+    stVpssGrpAttr.stFrameRate.s32DstFrameRate = 50;
     stVpssGrpAttr.enDynamicRange = DYNAMIC_RANGE_SDR8;
     stVpssGrpAttr.enPixelFormat = PIXEL_FORMAT_YVU_SEMIPLANAR_420;
     stVpssGrpAttr.bNrEn = HI_FALSE;
@@ -548,21 +522,20 @@ HI_S32 SAMPLE_RTSP_VDEC_VPSS(HI_VOID) {
     for (i = 0; i < u32VdecChnNum; i++)
     {
         abChnEnable[i] = HI_TRUE;
-        astVpssChnAttr[i].u32Width = stDispSize.u32Width;
-        astVpssChnAttr[i].u32Height = stDispSize.u32Height;
+        astVpssChnAttr[i].u32Width = 384;
+        astVpssChnAttr[i].u32Height = 216;
         astVpssChnAttr[i].enChnMode = VPSS_CHN_MODE_USER;
         astVpssChnAttr[i].enCompressMode = COMPRESS_MODE_NONE;
         astVpssChnAttr[i].enDynamicRange = DYNAMIC_RANGE_SDR8;
         astVpssChnAttr[i].enPixelFormat = PIXEL_FORMAT_YVU_SEMIPLANAR_420;
-        astVpssChnAttr[i].stFrameRate.s32SrcFrameRate = -1;
-        astVpssChnAttr[i].stFrameRate.s32DstFrameRate = -1;
-        astVpssChnAttr[i].u32Depth = 1;
+        astVpssChnAttr[i].stFrameRate.s32SrcFrameRate = 50;
+        astVpssChnAttr[i].stFrameRate.s32DstFrameRate = 50;
+        astVpssChnAttr[i].u32Depth = 2;
         astVpssChnAttr[i].bMirror = HI_FALSE;
         astVpssChnAttr[i].bFlip = HI_FALSE;
         astVpssChnAttr[i].stAspectRatio.enMode = ASPECT_RATIO_NONE;
         astVpssChnAttr[i].enVideoFormat = VIDEO_FORMAT_LINEAR;
     }
-    printf("vpss start entered \n");
     for (i = 0; i < u32VdecChnNum; i++)
     {
         VpssGrp = i;
@@ -572,11 +545,11 @@ HI_S32 SAMPLE_RTSP_VDEC_VPSS(HI_VOID) {
             goto END4;
         }
     }
-    printf("vpss start end \n");
     /************************************************
     step5:  VDEC bind VPSS
     *************************************************/
-    for (i = 0; i < u32VdecChnNum; i++) {
+    for (i = 0; i < u32VdecChnNum; i++)
+    {
         s32Ret = SAMPLE_COMM_VDEC_Bind_VPSS(i, i);
         if (s32Ret != HI_SUCCESS) {
             SAMPLE_PRT("vdec bind vpss fail for %#x!\n", s32Ret);
@@ -593,10 +566,6 @@ HI_S32 SAMPLE_RTSP_VDEC_VPSS(HI_VOID) {
             SAMPLE_PRT("HI_MPI_VENC_GetFd failed with %#x!\n",
                        VdecFd[i]);
             goto END5;
-        }
-        if (maxfd <= VdecFd[i])
-        {
-            maxfd = VdecFd[i];
         }
     }
 
@@ -625,7 +594,7 @@ HI_S32 SAMPLE_RTSP_VDEC_VPSS(HI_VOID) {
     step8:  send stream to VDEC
     *************************************************/
     for (i = 0; i < u32VdecChnNum; i++) {
-        snprintf(stVdecSend[i].cFileName, sizeof(stVdecSend[i].cFileName), "rtsp://admin:admin@192.168.19.101:554/cam/realmonitor?channel=1&subtype=0");
+        snprintf(stVdecSend[i].cFileName, sizeof(stVdecSend[i].cFileName), "rtsp://admin:admin123@192.168.19.19/ch1/h264/av_stream");
         stVdecSend[i].enType = astSampleVdec[i].enType;
         stVdecSend[i].s32StreamMode = astSampleVdec[i].enMode;
         stVdecSend[i].s32ChnId = i;
@@ -638,49 +607,75 @@ HI_S32 SAMPLE_RTSP_VDEC_VPSS(HI_VOID) {
         stVdecSend[i].s32MinBufSize = (astSampleVdec[i].u32Width * astSampleVdec[i].u32Height * 3) >> 1;
     }
 
+//    /************************************************
+//    step9:  start VENC
+//    *************************************************/
+//    VENC_GOP_ATTR_S stGopAttr;
+//    VENC_CHN VeH264Chn = 0;
+//    PAYLOAD_TYPE_E enStreamType = PT_H264;
+//    PIC_SIZE_E aenSize[VPSS_CHN_NUM];
+//    aenSize[0] = PIC_1080P;
+//    SAMPLE_RC_E enRcMode = SAMPLE_RC_CBR;
+//
+//    s32Ret = SAMPLE_COMM_VENC_GetGopAttr(VENC_GOPMODE_NORMALP, &stGopAttr);
+//    SAMPLE_CHECK_EXPR_GOTO(HI_SUCCESS != s32Ret, END5,
+//                           "Error(%#x),SAMPLE_COMM_VENC_GetGopAttr failed!\n",s32Ret);
+//    s32Ret = SAMPLE_COMM_VENC_Start(VeH264Chn, enStreamType,aenSize[0],enRcMode,0,&stGopAttr);
+//    SAMPLE_CHECK_EXPR_GOTO(HI_SUCCESS != s32Ret, END5,
+//                           "Error(%#x),SAMPLE_COMM_VENC_Start failed!\n",s32Ret);
+//    s32Ret = SAMPLE_COMM_VENC_StartGetStream(&VeH264Chn, 1);
+//    SAMPLE_CHECK_EXPR_GOTO(HI_SUCCESS != s32Ret, END5,
+//                           "Error(%#x),SAMPLE_COMM_VENC_StartGetStream failed!\n",s32Ret);
+
     SAMPLE_COMM_VDEC_StartSendStream(u32VdecChnNum, stVdecSend, VdecThread);
 
-    iveWorkerS.frameQueue = &frameQueue;
-    iveWorkerS.imageQueue = &imageQueue;
+    iveWorkerS.frameQueue = queueS->frameQueue;
+    iveWorkerS.pipeline = queueS->nniePipelineQueue;
 
     SAMPLE_COMM_VDEC_StartIve(u32IveChnNum, &iveWorkerS, IveThread);
 
-    nnieWorkerS.imageQueue = &imageQueue;
     nnieWorkerS.s_stSsdNnieParam = &s_stSsdNnieParam;
+    nnieWorkerS.pipeline = queueS->nniePipelineQueue;
 
     SAMPLE_COMM_VDEC_StartNnie(u32NnieChnNum, &nnieWorkerS, NnieThread);
 
+    struct timeval tv_begin;
+    struct timeval tv_end;
+    HI_FLOAT elasped;
+
+    HI_S32 ep = epoll_create(1);
+
+    struct epoll_event event[VDEC_MAX_CHN_NUM];
+
+    for(channel_index = 0; channel_index < u32VdecChnNum; channel_index++)
+    {
+        event[channel_index].events = (uint32_t) (EPOLLIN | EPOLLOUT | EPOLLET);
+        event[channel_index].data.fd = VdecFd[channel_index];
+        epoll_ctl(ep, EPOLL_CTL_ADD, VdecFd[channel_index], &event[channel_index]);
+    }
+
     while (1)
     {
-        FD_ZERO(&read_fds);
-        for (channel_index = 0; channel_index < u32VdecChnNum; channel_index++)
-        {
-            FD_SET(VdecFd[channel_index], &read_fds);
-        }
+        gettimeofday(&tv_begin, NULL);
 
-        TimeoutVal.tv_sec  = 2;
-        TimeoutVal.tv_usec = 0;
-        s32Ret = select(maxfd + 1, &read_fds, NULL, NULL, &TimeoutVal);
+        s32Ret = epoll_wait(ep, event, VDEC_MAX_CHN_NUM, 100);
+
+        gettimeofday(&tv_end, NULL);
+        elasped = ((tv_end.tv_sec - tv_begin.tv_sec) * 1000000.0f + tv_end.tv_usec - tv_begin.tv_usec) / 1000.0f;
 
         if (s32Ret < 0)
         {
-            SAMPLE_PRT("select failed!\n");
+            SAMPLE_PRT("epoll failed!\n");
             break;
         }
         else if (s32Ret == 0)
         {
-            SAMPLE_PRT("get vdec stream time out, exit thread\n");
             continue;
         }
         for (channel_index = 0; channel_index < u32VdecChnNum; channel_index++)
         {
-            if (FD_ISSET(VdecFd[channel_index], &read_fds))
+            if (event[channel_index].events & EPOLLIN)
             {
-#ifdef SAVE
-                FILE * pFile = fopen("123.yuv", "wb");
-                FILE * pFile_bgr = fopen("123.bgr_planar_384x216", "wb");
-                FILE * pFile_bgr_1080p = fopen("123.bgr_planar_1920x1080", "wb");
-#endif
                 VIDEO_FRAME_INFO_S *video_frame_info_s = new VIDEO_FRAME_INFO_S;
                 memset(video_frame_info_s, 0, sizeof(VIDEO_FRAME_INFO_S));
 
@@ -688,50 +683,13 @@ HI_S32 SAMPLE_RTSP_VDEC_VPSS(HI_VOID) {
 
                 if(s32Ret == HI_SUCCESS)
                 {
-                    frameQueue.push(video_frame_info_s);
-/*
-                    printf("physical addr = %llx \n", video_frame_info_s->stVFrame.u64PhyAddr[0]);
-                    printf("virtual addr = %llx \n", video_frame_info_s->stVFrame.u64VirAddr[0]);
-                    printf("height = %d \n", video_frame_info_s->stVFrame.u32Height);
-                    printf("width = %d \n", video_frame_info_s->stVFrame.u32Width);
-                    printf("pixle format = %d \n", video_frame_info_s->stVFrame.enPixelFormat);
-                    printf("stride 0 = %d \n", video_frame_info_s->stVFrame.u32Stride[0]);
-                    printf("stride 1 = %d \n", video_frame_info_s->stVFrame.u32Stride[1]);
-*/
-
-#ifdef SAVE
-                    u32WidthInBytes = pstDstImg->u32Width*3;
-                    u32Stride = ALIGN_UP(u32WidthInBytes, 16);
-
-                    pUserPageAddr = (HI_U8*) pstDstImg->au64VirAddr[0];
-
-                    if (HI_NULL != pUserPageAddr)
-                    {
-                        //printf("%s %d:HI_MPI_SYS_Mmap fail!!! u32Size=%d\n",__func__, __LINE__,u32Size);
-                        fprintf(stderr, "saving......RGB..%d x %d......", pstDstImg->u32Width, pstDstImg->u32Height);
-                        fflush(stderr);
-
-                        HI_U8 *pTmp = pUserPageAddr;
-                        for (i = 0; i < pstDstImg->u32Height; i++, pTmp += u32Stride)
-                        {
-                            fwrite(pTmp, u32WidthInBytes, 1, pFile_bgr) ;
-                        }
-                        fflush(pFile_bgr);
-
-                        fprintf(stderr, "done!\n");
-                        fflush(stderr);
-                    }
-#endif
-
-//                    FILE *pFile = fopen("123.yuv", "wb");
-//                    SAMPLE_COMM_VDEC_SaveYUVFile_Linear8Bit(pFile, &(video_frame_info_s->stVFrame));
+                    queueS->frameQueue->push(make_pair(channel_index, video_frame_info_s));
                 }
-#ifdef SAVE
-                fclose(pFile);
-                fclose(pFile_bgr);
-                fclose(pFile_bgr_1080p);
-#endif
-                k++;
+                else
+                {
+                    delete video_frame_info_s;
+                    video_frame_info_s = nullptr;
+                }
             }
         }
     };
@@ -766,7 +724,7 @@ END2:
 END1:
     SAMPLE_COMM_SYS_Exit();
 
-    return s32Ret;
+    return NULL;
 }
 
 /******************************************************************************
@@ -777,23 +735,313 @@ int main(int argc, char *argv[])
 {
     HI_S32 s32Ret = HI_SUCCESS;
 
+    crow::SimpleApp app;
+
+    app.loglevel(crow::LogLevel::INFO);
+
     signal(SIGINT, SAMPLE_VDEC_HandleSig);
     signal(SIGTERM, SAMPLE_VDEC_HandleSig);
+
+    concurrent_bounded_queue<pair<HI_U32, VIDEO_FRAME_INFO_S *>> frameQueue;
+    frameQueue.set_capacity(50);
+
+    concurrent_bounded_queue<pair<pair<HI_U32, VIDEO_FRAME_INFO_S *>, IVE_IMAGE_S *>> nniePipelineQueue;
+    nniePipelineQueue.set_capacity(50);
 
     /******************************************
      choose the case
     ******************************************/
 
-    s32Ret = SAMPLE_RTSP_VDEC_VPSS();
+    pthread_t main_thread;
 
-    if (HI_SUCCESS == s32Ret)
-    {
-        SAMPLE_PRT("program exit normally!\n");
-    }
-    else
-    {
-        SAMPLE_PRT("program exit abnormally!\n");
-    }
+    QUEUE_S queueS;
+    queueS.frameQueue = &frameQueue;
+    queueS.nniePipelineQueue = &nniePipelineQueue;
+
+    pthread_create(&main_thread, 0, SAMPLE_RTSP_VDEC_VPSS, (HI_VOID *)&queueS);
+
+    CROW_ROUTE(app, "/homepage")
+            ([&] {
+                crow::json::wvalue response;
+                response["framequeue"] = to_string(frameQueue.size());
+                response["nniequeue"] = to_string(nniePipelineQueue.size());
+                return response;
+            });
+
+    CROW_ROUTE(app, "/")
+            ([]{
+                return crow::mustache::load("login.html").render();
+            });
+
+    CROW_ROUTE(app, "/style.css")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+                         return crow::mustache::load("style.css").render();
+                     });
+
+    CROW_ROUTE(app, "/reset.css")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+                         return crow::mustache::load("reset.css").render();
+                     });
+
+    CROW_ROUTE(app, "/supersized.css")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+                         return crow::mustache::load("supersized.css").render();
+                     });
+
+    CROW_ROUTE(app, "/jquery-1.8.2.min.js")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+                         return crow::mustache::load("jquery-1.8.2.min.js").render();
+                     });
+
+    CROW_ROUTE(app, "/supersized.3.2.7.min.js")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+
+                         return crow::mustache::load("supersized.3.2.7.min.js").render();
+                     });
+
+    CROW_ROUTE(app, "/jszip.min.js")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+
+                         return crow::mustache::load("jszip.min.js").render();
+                     });
+
+    CROW_ROUTE(app, "/FileSaver.js")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+
+                         return crow::mustache::load("FileSaver.js").render();
+                     });
+
+    CROW_ROUTE(app, "/supersized-init.js")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+
+                         return crow::mustache::load("supersized-init.js").render();
+                     });
+
+    CROW_ROUTE(app, "/scripts.js")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+
+                         return crow::mustache::load("scripts.js").render();
+                     });
+
+    CROW_ROUTE(app, "/assets/img/backgrounds/3.jpg")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+
+                         return crow::mustache::load("3.jpg").render();
+                     });
+
+    CROW_ROUTE(app, "/assets/img/backgrounds/1.jpg")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+
+                         return crow::mustache::load("/1.jpg").render();
+                     });
+
+    CROW_ROUTE(app, "/assets/img/backgrounds/2.jpg")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+
+                         return crow::mustache::load("/2.jpg").render();
+                     });
+
+    CROW_ROUTE(app, "/img/progress.gif")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+
+                         return crow::mustache::load("progress.gif").render();
+                     });
+
+    CROW_ROUTE(app, "/send")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+
+                         return crow::mustache::load("homepage.html").render();
+                     });
+
+
+    CROW_ROUTE(app, "/license_state.html")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+
+                         return crow::mustache::load("license_state.html").render();
+                     });
+
+    CROW_ROUTE(app, "/homepage.html")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+
+                         return crow::mustache::load("homepage.html").render();
+                     });
+
+    CROW_ROUTE(app, "/cluster_state.html")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+
+                         return crow::mustache::load("cluster_state.html").render();
+                     });
+
+    CROW_ROUTE(app, "/a.css")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+
+                         return crow::mustache::load("a.css").render();
+                     });
+
+    CROW_ROUTE(app, "/x.js")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+
+                         return crow::mustache::load("x.js").render();
+                     });
+
+    CROW_ROUTE(app, "/css/bootstrap.css")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+
+                         return crow::mustache::load("bootstrap.css").render();
+                     });
+
+    CROW_ROUTE(app, "/css/site.css")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+
+                         return crow::mustache::load("site.css").render();
+                     });
+
+    CROW_ROUTE(app, "/css/bootstrap-responsive.css")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+
+                         return crow::mustache::load("bootstrap-responsive.css").render();
+                     });
+
+    CROW_ROUTE(app, "/js/jquery.js")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+
+                         return crow::mustache::load("jquery.js").render();
+                     });
+
+    CROW_ROUTE(app, "/js/bootstrap.min.js")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+
+                         return crow::mustache::load("bootstrap.min.js").render();
+                     });
+
+    CROW_ROUTE(app, "/img/bg.png")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+
+                         return crow::mustache::load("bg.png").render();
+                     });
+
+    CROW_ROUTE(app, "/img/glyphicons-halflings.png")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+
+                         return crow::mustache::load("glyphicons-halflings.png").render();
+                     });
+
+    CROW_ROUTE(app, "/aes.js")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+
+                         return crow::mustache::load("aes.js").render();
+                     });
+
+    CROW_ROUTE(app, "/install_license.html")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+
+                         return crow::mustache::load("install_license.html").render();
+                     });
+
+    CROW_ROUTE(app, "/json-formdata.js")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+
+                         return crow::mustache::load("json-formdata.js").render();
+                     });
+
+    CROW_ROUTE(app, "/readZIP.js")
+            .methods("GET"_method, "POST"_method)
+                    ([](const crow::request& req)
+                     {
+                         CROW_LOG_INFO << "msg from client: " << req.body;
+
+                         return crow::mustache::load("readZIP.js").render();
+                     });
+
+
+    app.port(17043).run();
 
     return s32Ret;
 }
